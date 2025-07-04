@@ -1,203 +1,180 @@
-# အဟောင်းဖိုင်ကို ဖျက်ပါ
-sudo rm -f /usr/local/bin/pphdev_vip_manager.sh
-
-# အသစ်ဖိုင်ထည့်ပါ
-cat > /usr/local/bin/pphdev_vip_manager.sh << 'EOF'
 #!/bin/bash
 
-USER_DB="/etc/hysteria/udpusers.db"
-CONFIG_FILE="/etc/hysteria/config.json"
-ONLINE_USERS_FILE="/var/log/hysteria_online_users.log"
+CONFIG_DIR="/etc/hysteria"
+SUBSCRIPTION_DB="$CONFIG_DIR/subscriptions.db"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+SYSTEMD_SERVICE="/etc/systemd/system/hysteria-server.service"
+API_IP=""
 
-# Check if command exists
-has_command() {
-    command -v "$1" >/dev/null 2>&1
-}
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Helper functions
+log_info() { echo -e "${BLUE}ℹ${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_error() { echo -e "${RED}❌${NC} $1"; }
+check_command() { command -v "$1" >/dev/null 2>&1 || { log_error "Required command '$1' not found"; exit 1; }; }
 
 # Initialize database
 init_database() {
-    if [[ ! -f "$USER_DB" ]]; then
-        echo "Database not found. Creating new database..."
-        mkdir -p "$(dirname "$USER_DB")"
-        sqlite3 "$USER_DB" << EOF
-CREATE TABLE IF NOT EXISTS users (
-    username TEXT PRIMARY KEY,
-    password TEXT NOT NULL
-);
+    check_command sqlite3
+    sqlite3 "$SUBSCRIPTION_DB" <<EOF
 CREATE TABLE IF NOT EXISTS subscriptions (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    key TEXT UNIQUE NOT NULL,
-    valid_days INTEGER NOT NULL,
-    expiration_date TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS online_sessions (
-    id INTEGER PRIMARY KEY,
-    key TEXT,
-    ip_address TEXT,
-    connect_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    disconnect_time DATETIME,
-    status TEXT DEFAULT 'online',
-    FOREIGN KEY(key) REFERENCES subscriptions(key)
+    name TEXT,
+    key TEXT PRIMARY KEY,
+    valid INTEGER NOT NULL,
+    expiration TEXT NOT NULL,
+    token TEXT NOT NULL
 );
 EOF
-    fi
+    log_success "Database initialized."
 }
 
-# Update Hysteria config with subscription keys
-update_userpass_config() {
-    local keys=$(sqlite3 "$USER_DB" "SELECT key FROM subscriptions;" | paste -sd, -)
-    local key_array=$(echo "$keys" | awk -F, '{for(i=1;i<=NF;i++) printf "\"" $i "\"" ((i==NF) ? "" : ",")}')
-    jq ".auth.config = [$key_array]" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-}
-
-# Restart Hysteria server
-restart_server() {
-    echo "Restarting Hysteria server..."
-    systemctl restart hysteria-server
-}
-
-# Add a new subscription
+# Add subscription
 add_subscription() {
     echo -e "\n\e[1;34mEnter subscription name:\e[0m"
     read -r name
-    echo -e "\e[1;34mEnter subscription key:\e[0m"
+    echo -e "\e[1;34mEnter key (or leave blank to generate):\e[0m"
     read -r key
-    echo -e "\e[1;34mEnter validity period (days):\e[0m"
-    read -r valid_days
-    local expiration_date=$(date -d "+$valid_days days" '+%Y-%m-%d %H:%M:%S')
-    
-    sqlite3 "$USER_DB" "INSERT INTO subscriptions (name, key, valid_days, expiration_date) VALUES ('$name', '$key', $valid_days, '$expiration_date');"
-    if [[ $? -eq 0 ]]; then
-        echo -e "\e[1;32mSubscription $name with key $key added successfully.\e[0m"
-        update_userpass_config
-        restart_server
+    key=${key:-$(uuidgen)}
+    echo -e "\e[1;34mEnter validity (days):\e[0m"
+    read -r valid
+    echo -e "\e[1;34mEnter expiration date (YYYY-MM-DD):\e[0m"
+    read -r expiration
+    token=$(uuidgen)
+    response=$(curl -s -X POST "http://$API_IP:5000/pphdev/add" -H "Content-Type: application/json" -d "{\"name\":\"$name\",\"key\":\"$key\",\"valid\":$valid,\"expiration\":\"$expiration\",\"token\":\"$token\"}")
+    if echo "$response" | grep -q '"status":"success"'; then
+        log_success "Subscription $name added successfully."
     else
-        echo -e "\e[1;31mError: Failed to add subscription $name.\e[0m"
+        log_error "Failed to add subscription: $response"
     fi
 }
 
-# Edit a subscription
+# Edit subscription
 edit_subscription() {
-    echo -e "\n\e[1;34mEnter subscription key to edit:\e[0m"
+    echo -e "\n\e[1;34mEnter key to edit:\e[0m"
     read -r key
-    echo -e "\e[1;34mEnter new name (leave blank to keep unchanged):\e[0m"
-    read -r new_name
-    echo -e "\e[1;34mEnter new validity period (days, leave blank to keep unchanged):\e[0m"
-    read -r new_valid_days
-    
-    local update_query="UPDATE subscriptions SET"
-    local updates=""
-    if [[ -n "$new_name" ]]; then
-        updates="name='$new_name'"
-    fi
-    if [[ -n "$new_valid_days" ]]; then
-        local new_expiration_date=$(date -d "+$new_valid_days days" '+%Y-%m-%d %H:%M:%S')
-        if [[ -n "$updates" ]]; then
-            updates="$updates, "
-        fi
-        updates="${updates}valid_days=$new_valid_days, expiration_date='$new_expiration_date'"
-    fi
-    
-    if [[ -n "$updates" ]]; then
-        sqlite3 "$USER_DB" "$update_query $updates WHERE key='$key';"
-        if [[ $? -eq 0 ]]; then
-            echo -e "\e[1;32mSubscription with key $key updated successfully.\e[0m"
-            update_userpass_config
-            restart_server
-        else
-            echo -e "\e[1;31mError: Failed to update subscription with key $key.\e[0m"
-        fi
+    echo -e "\e[1;34mEnter new name:\e[0m"
+    read -r name
+    response=$(curl -s "http://$API_IP:5000/pphdev/update?key=$key&name=$name")
+    if echo "$response" | grep -q '"status":"success"'; then
+        log_success "Subscription name updated."
     else
-        echo -e "\e[1;33mNo changes provided.\e[0m"
+        log_error "Failed to update subscription: $response"
     fi
 }
 
-# Delete a subscription
+# Delete subscription
 delete_subscription() {
-    echo -e "\n\e[1;34mEnter subscription key to delete:\e[0m"
+    echo -e "\n\e[1;34mEnter key to delete:\e[0m"
     read -r key
-    sqlite3 "$USER_DB" "DELETE FROM subscriptions WHERE key='$key';"
-    if [[ $? -eq 0 ]]; then
-        echo -e "\e[1;32mSubscription with key $key deleted successfully.\e[0m"
-        update_userpass_config
-        restart_server
+    response=$(curl -s "http://$API_IP:5000/pphdev/delete?key=$key")
+    if echo "$response" | grep -q '"status":"success"'; then
+        log_success "Subscription deleted."
     else
-        echo -e "\e[1;31mError: Failed to delete subscription with key $key.\e[0m"
+        log_error "Failed to delete subscription: $response"
     fi
 }
 
-# Show all subscriptions
+# Set expiration
+set_expiration() {
+    echo -e "\n\e[1;34mEnter key to set expiration:\e[0m"
+    read -r key
+    echo -e "\e[1;34mEnter new expiration date (YYYY-MM-DD):\e[0m"
+    read -r expiration
+    response=$(curl -s "http://$API_IP:5000/pphdev/set_expiration?key=$key&expiration=$expiration")
+    if echo "$response" | grep -q '"status":"success"'; then
+        log_success "Expiration date updated."
+    else
+        log_error "Failed to update expiration: $response"
+    fi
+}
+
+# Show subscriptions
 show_subscriptions() {
     echo -e "\n\e[1;34mCurrent subscriptions:\e[0m"
-    sqlite3 "$USER_DB" "SELECT name, key, valid_days, expiration_date FROM subscriptions;" | while IFS='|' read -r name key valid_days expiration_date; do
-        printf "\e[1;37mName: %-20s Key: %-30s Valid Days: %-10s Expiration: %s\e[0m\n" "$name" "$key" "$valid_days" "$expiration_date"
+    sqlite3 "$SUBSCRIPTION_DB" "SELECT name, key, valid, expiration FROM subscriptions;" | while IFS='|' read -r name key valid exp; do
+        printf "\e[1;37mName: %-20s Key: %-36s Valid: %-3s Exp: %s\e[0m\n" "$name" "$key" "$valid" "$exp"
     done
+}
+
+# Restart server
+restart_server() {
+    systemctl restart hysteria-server
+    log_success "Server restarted."
+}
+
+# Uninstall server
+uninstall_server() {
+    echo -e "\n\e[1;34mUninstalling PPHdev UDP server...\e[0m"
+    systemctl stop hysteria-server pphdev-api
+    systemctl disable hysteria-server pphdev-api
+    rm -f "$SYSTEMD_SERVICE" "$API_SERVICE"
+    systemctl daemon-reload
+    rm -rf "$CONFIG_DIR" "$EXECUTABLE_INSTALL_PATH" "$API_SCRIPT" "$MANAGER_SCRIPT" "$SYMLINK_PATH"
+    iptables -t nat -F PREROUTING 2>/dev/null
+    ip6tables -t nat -F PREROUTING 2>/dev/null
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
+    log_success "PPHdev UDP server uninstalled."
+}
+
+# Show banner
+show_banner() {
+    echo -e "\e[1;36m---------------------------------------------"
+    echo " PPHdev VIP Manager"
+    echo " (c) 2025 pphdev"
+    echo " Telegram: @pphdev"
+    echo "---------------------------------------------\e[0m"
 }
 
 # Show menu
 show_menu() {
     echo -e "\e[1;36m----------------------------"
-    echo " PPH UDP Manager"
+    echo " PPHdev VIP Manager"
     echo -e "----------------------------\e[0m"
-    echo -e "\e[1;32m1. Add new user"
-    echo "2. Edit user password"
-    echo "3. Delete user"
-    echo "4. Show users"
-    echo "5. Add new subscription"
-    echo "6. Edit subscription"
-    echo "7. Delete subscription"
-    echo "8. Show subscriptions"
-    echo "9. Restart server"
-    echo "10. Exit\e[0m"
+    echo -e "\e[1;32m1. Add new subscription"
+    echo "2. Edit subscription name"
+    echo "3. Delete subscription"
+    echo "4. Set expiration date"
+    echo "5. Show subscriptions"
+    echo "6. Restart server"
+    echo "7. Uninstall server"
+    echo -e "8. Exit\e[0m"
     echo -e "\e[1;36m----------------------------"
     echo -e "Enter your choice: \e[0m"
 }
 
-# Main loop
-main() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "This script must be run as root."
-        exit 1
+# Get API IP from config
+get_api_ip() {
+    API_IP=$(grep -oP 'API_IP=\K.*' /etc/hysteria/api_ip.txt 2>/dev/null)
+    if [[ -z "$API_IP" ]]; then
+        echo -e "\e[1;34mEnter API server IP:\e[0m"
+        read -r API_IP
+        echo "API_IP=$API_IP" > /etc/hysteria/api_ip.txt
     fi
-
-    if ! has_command sqlite3; then
-        install_software "sqlite3"
-    fi
-    if ! has_command jq; then
-        install_software "jq"
-    fi
-
-    init_database
-
-    while true; do
-        show_menu
-        read -r choice
-        case $choice in
-            1) add_user ;;
-            2) edit_user ;;
-            3) delete_user ;;
-            4) show_users ;;
-            5) add_subscription ;;
-            6) edit_subscription ;;
-            7) delete_subscription ;;
-            8) show_subscriptions ;;
-            9) restart_server ;;
-            10) clear; exit 0 ;;
-            *) echo -e "\e[1;31mInvalid choice. Please try again.\e[0m" ;;
-        esac
-    done
 }
 
-# Placeholder functions for user management
-add_user() { echo "User management not implemented."; }
-edit_user() { echo "User management not implemented."; }
-delete_user() { echo "User management not implemented."; }
-show_users() { echo "User management not implemented."; }
-
-main
-EOF
-
-# Script ကို executable လုပ်ပါ
-chmod +x /usr/local/bin/pphdev_vip_manager.sh
+# Initialize database
+init_database
+get_api_ip
+show_banner
+while true; do
+    show_menu
+    read -r choice
+    case $choice in
+        1) add_subscription ;;
+        2) edit_subscription ;;
+        3) delete_subscription ;;
+        4) set_expiration ;;
+        5) show_subscriptions ;;
+        6) restart_server ;;
+        7) uninstall_server; exit 0 ;;
+        8) clear; exit 0 ;;
+        *) echo -e "\e[1;31mInvalid choice. Please try again.\e[0m" ;;
+    esac
+done
