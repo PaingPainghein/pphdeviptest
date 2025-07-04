@@ -1,3 +1,8 @@
+# အဟောင်းဖိုင်ကို ဖျက်ပါ
+sudo rm -f /usr/local/bin/pphdev_vip_manager.sh
+
+# အသစ်ဖိုင်ထည့်ပါ
+cat > /usr/local/bin/pphdev_vip_manager.sh << 'EOF'
 #!/bin/bash
 
 USER_DB="/etc/hysteria/udpusers.db"
@@ -134,7 +139,7 @@ show_subscriptions() {
 # Show menu
 show_menu() {
     echo -e "\e[1;36m----------------------------"
-    echo " PPH VIP Manager"
+    echo " PPH UDP Manager"
     echo -e "----------------------------\e[0m"
     echo -e "\e[1;32m1. Add new user"
     echo "2. Edit user password"
@@ -185,10 +190,14 @@ main() {
     done
 }
 
-# Placeholder functions for user management (to be implemented if needed)
+# Placeholder functions for user management
 add_user() { echo "User management not implemented."; }
 edit_user() { echo "User management not implemented."; }
 delete_user() { echo "User management not implemented."; }
 show_users() { echo "User management not implemented."; }
 
 main
+EOF
+
+# Script ကို executable လုပ်ပါ
+chmod +x /usr/local/bin/pphdev_vip_manager.sh
