@@ -1,3 +1,8 @@
+# အဟောင်းဖိုင်ကို ဖျက်ပါ
+sudo rm -f /tmp/install_pphdev_vip.sh
+
+# အသစ်ဖိုင်ထည့်ပါ
+cat > /tmp/install_pphdev_vip.sh << 'EOF'
 #!/bin/bash
 
 # Variables
@@ -155,7 +160,7 @@ def add_subscription():
     name = data.get('name')
     key = data.get('key')
     valid_days = data.get('valid_days')
-    expiration_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    expiration_date = (datetime.now() + timedelta(days=valid_days)).strftime('%Y-%m-%d %H:%M:%S')
     
     conn = get_db()
     cursor = conn.cursor()
@@ -171,11 +176,12 @@ def update_subscription():
     key = data.get('key')
     name = data.get('name')
     valid_days = data.get('valid_days')
+    expiration_date = (datetime.now() + timedelta(days=valid_days)).strftime('%Y-%m-%d %H:%M:%S')
     
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE subscriptions SET name = ?, valid_days = ?, expiration_date = ? WHERE key = ?",
-                   (name, valid_days, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), key))
+                   (name, valid_days, expiration_date, key))
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'})
@@ -237,7 +243,7 @@ EOF
 # Setup SSL (self-signed for testing)
 setup_ssl() {
     echo "Setting up SSL..."
-    if [[ ! -f /etc/hysteria/server.crt ]]; then
+    if [[ ! -f /etc/h Hysteria/server.crt ]]; then
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
             -keyout /etc/hysteria/server.key \
             -out /etc/hysteria/server.crt \
@@ -282,3 +288,8 @@ fi
 # Execute installation
 perform_install
 echo "Installation completed successfully!"
+EOF
+
+# Script ကို executable လုပ်ပြီး run ပါ
+chmod +x /tmp/install_pphdev_vip.sh
+sudo /tmp/install_pphdev_vip.sh
